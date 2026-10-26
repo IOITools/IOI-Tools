@@ -1,4 +1,67 @@
-﻿<#
+# ============================================================
+# FUNCIÓN REAL DE LIMPIEZA DE RAM (EmptyWorkingSet)
+# IOI Tools - Fase 3
+# ============================================================
+function Clear-IOIRAM {
+    param(
+        [ValidateSet('Estandar','Profundo')]
+        [string]$Modo = 'Estandar'
+    )
+
+    # Cargamos la API de Windows para EmptyWorkingSet
+    if (-not ([System.Management.Automation.PSTypeName]'IOI.RAM').Type) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class IOI_RAM {
+    [DllImport("psapi.dll")]
+    public static extern int EmptyWorkingSet(IntPtr hProcess);
+}
+"@
+    }
+
+    $procesos = Get-Process -ErrorAction SilentlyContinue
+    $liberados = 0
+    $totalProcesos = $procesos.Count
+
+    # En modo PROFUNDO incluimos procesos del sistema (requiere Admin)
+    if ($Modo -eq 'Profundo') {
+        $procesos = Get-Process -IncludeUserName -ErrorAction SilentlyContinue
+    }
+
+    foreach ($proc in $procesos) {
+        try {
+            # No tocamos procesos críticos del sistema ni el propio PowerShell
+            if ($proc.Id -eq $PID) { continue }
+            if ($proc.ProcessName -in @('System','Idle','csrss','wininit','services','lsass','smss')) { continue }
+
+            $handle = $proc.Handle
+            if ($handle -ne [IntPtr]::Zero) {
+                [void][IOI_RAM]::EmptyWorkingSet($handle)
+                $liberados++
+            }
+        } catch {
+            # Procesos protegidos o sin permisos: se ignoran silenciosamente
+            continue
+        }
+    }
+
+    # Calculamos RAM libre antes/después (aproximado)
+    $ramLibre = [math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1024, 0)
+
+    return [PSCustomObject]@{
+        Modo           = $Modo
+        ProcesosTotal  = $totalProcesos
+        ProcesosLibres = $liberados
+        RAMLibreMB     = $ramLibre
+        Mensaje        = "Limpieza $Modo completada. $liberados de $totalProcesos procesos optimizados. RAM libre: $ramLibre MB."
+    }
+}
+# ============================================================
+# FIN FUNCIÓN Clear-IOIRAM
+# ============================================================
+
+<#
 .SYNOPSIS
     IOI Tools v7.2 - MS Store Look + Background Tasks + Progress Bars
 .DESCRIPTION
@@ -17,28 +80,41 @@ Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
 #endregion
 
-#region ADMIN CHECK
-function Test-IsAdministrator {
-    $Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $Principal = New-Object Security.Principal.WindowsPrincipal($Identity)
-    return $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
+#region ADMIN CHECK & UNIVERSAL LAUNCH
+$CurrentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
+$Principal = New-Object Security.Principal.WindowsPrincipal($CurrentUser)
+$IsAdmin = $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$IsSTA = [System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA'
 
-if (-not (Test-IsAdministrator)) {
+if (-not $IsAdmin -or -not $IsSTA) {
+    # Detectamos si estamos en PS7 (pwsh) o en el clásico (powershell)
+    $CurrentExe = (Get-Process -Id $PID).Path
     $Args = "-NoProfile -STA -ExecutionPolicy Bypass -File `"$PSCommandPath`""
-    Start-Process "powershell.exe" -ArgumentList $Args -Verb RunAs
-    exit 0
+    
+    if (-not $IsAdmin) {
+        Start-Process $CurrentExe -ArgumentList $Args -Verb RunAs
+    } else {
+        Start-Process $CurrentExe -ArgumentList $Args
+    }
+    exit
 }
 #endregion
 
 #region CARGA DE CONFIGURACIÓN
-# Detectar la ruta de IOI_Config.ps1 desde la ubicación del script
 $ScriptDir = Split-Path $MyInvocation.MyCommand.Path -Parent
+# Buscamos el Config.ps1 un nivel arriba (en la raíz de IOI_Original)
 $IOI_Config = Join-Path (Split-Path $ScriptDir -Parent) "Config\IOI_Config.ps1"
 
 if (-not (Test-Path $IOI_Config)) {
-    $IOI_Config = Join-Path $ScriptDir "Config\IOI_Config.ps1"
+    # Si no lo encuentra ahí, busca dentro de la misma carpeta Scripts
+    $IOI_Config = Join-Path $ScriptDir "IOI_Config.ps1"
 }
+
+if (-not (Test-Path $IOI_Config)) {
+    [System.Windows.MessageBox]::Show("No se encontró IOI_Config.ps1 en:`n$IOI_Config", "IOI Tools Error", "OK", "Error") | Out-Null
+    exit 1
+}
+
 . $IOI_Config
 #endregion
 
@@ -187,33 +263,48 @@ function Show-ToastNotification {
 <Window
  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
- Title="IOI Tools - Universal Edition"
- Width="1300" Height="850" MinWidth="1150" MinHeight="720"
+ Title="IOI Tools v7.2 - by Cristian Viera"
+ Width="1300"
+ Height="870"
+ MinWidth="1150"
+ MinHeight="720"
  WindowStartupLocation="CenterScreen"
- Background="#1C1F24" FontFamily="Segoe UI Variable, Segoe UI"
- ResizeMode="CanResize" WindowStyle="SingleBorderWindow">
+ Background="#0C0C0C"
+ FontFamily="Segoe UI"
+ ResizeMode="CanResize"
+ WindowStyle="SingleBorderWindow">
 
  <Window.Resources>
+
    <Style x:Key="NavButton" TargetType="Button">
-     <Setter Property="Foreground" Value="#9CA3AF"/>
+     <Setter Property="Foreground" Value="#E0E0E0"/>
      <Setter Property="Background" Value="Transparent"/>
+     <Setter Property="BorderBrush" Value="Transparent"/>
      <Setter Property="BorderThickness" Value="0"/>
-     <Setter Property="Height" Value="45"/>
-     <Setter Property="Margin" Value="0,2,0,2"/>
+     <Setter Property="Height" Value="44"/>
+     <Setter Property="Margin" Value="0,0,0,2"/>
      <Setter Property="Padding" Value="16,0"/>
      <Setter Property="HorizontalContentAlignment" Value="Left"/>
-     <Setter Property="FontSize" Value="14"/>
+     <Setter Property="FontSize" Value="13"/>
      <Setter Property="Cursor" Value="Hand"/>
      <Setter Property="Template">
        <Setter.Value>
          <ControlTemplate TargetType="Button">
-           <Border Background="{TemplateBinding Background}" CornerRadius="6" x:Name="border">
-             <ContentPresenter Margin="{TemplateBinding Padding}" VerticalAlignment="Center"/>
+           <Border Background="{TemplateBinding Background}"
+                   BorderBrush="{TemplateBinding BorderBrush}"
+                   BorderThickness="{TemplateBinding BorderThickness}"
+                   CornerRadius="8"
+                   x:Name="border">
+             <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                               VerticalAlignment="Center"
+                               Margin="{TemplateBinding Padding}"/>
            </Border>
            <ControlTemplate.Triggers>
              <Trigger Property="IsMouseOver" Value="True">
-               <Setter TargetName="border" Property="Background" Value="#2D333B"/>
-               <Setter Property="Foreground" Value="#F3F4F6"/>
+               <Setter TargetName="border" Property="Background" Value="#1F2B3A"/>
+             </Trigger>
+             <Trigger Property="IsPressed" Value="True">
+               <Setter TargetName="border" Property="Background" Value="#2A3F55"/>
              </Trigger>
            </ControlTemplate.Triggers>
          </ControlTemplate>
@@ -223,21 +314,28 @@ function Show-ToastNotification {
 
    <Style x:Key="PrimaryButton" TargetType="Button">
      <Setter Property="Foreground" Value="#000000"/>
-     <Setter Property="Background" Value="#10B981"/>
+     <Setter Property="Background" Value="#00E5FF"/>
      <Setter Property="BorderThickness" Value="0"/>
      <Setter Property="Height" Value="42"/>
-     <Setter Property="Padding" Value="24,0"/>
+     <Setter Property="MinWidth" Value="160"/>
+     <Setter Property="Padding" Value="20,0"/>
+     <Setter Property="Margin" Value="0,0,10,0"/>
      <Setter Property="FontWeight" Value="SemiBold"/>
      <Setter Property="Cursor" Value="Hand"/>
      <Setter Property="Template">
        <Setter.Value>
          <ControlTemplate TargetType="Button">
-           <Border Background="{TemplateBinding Background}" CornerRadius="6" x:Name="border">
+           <Border Background="{TemplateBinding Background}"
+                   CornerRadius="8"
+                   x:Name="border">
              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
            </Border>
            <ControlTemplate.Triggers>
              <Trigger Property="IsMouseOver" Value="True">
-               <Setter TargetName="border" Property="Background" Value="#34D399"/>
+               <Setter TargetName="border" Property="Background" Value="#33EBFF"/>
+             </Trigger>
+             <Trigger Property="IsPressed" Value="True">
+               <Setter TargetName="border" Property="Background" Value="#00C4DB"/>
              </Trigger>
            </ControlTemplate.Triggers>
          </ControlTemplate>
@@ -246,153 +344,200 @@ function Show-ToastNotification {
    </Style>
 
    <Style x:Key="SecondaryButton" TargetType="Button">
-     <Setter Property="Foreground" Value="#D1D5DB"/>
+     <Setter Property="Foreground" Value="#E0E0E0"/>
      <Setter Property="Background" Value="Transparent"/>
-     <Setter Property="BorderBrush" Value="#374151"/>
+     <Setter Property="BorderBrush" Value="#00E5FF"/>
      <Setter Property="BorderThickness" Value="1"/>
      <Setter Property="Height" Value="42"/>
-     <Setter Property="Padding" Value="24,0"/>
+     <Setter Property="MinWidth" Value="160"/>
+     <Setter Property="Padding" Value="20,0"/>
+     <Setter Property="Margin" Value="0,0,10,0"/>
      <Setter Property="Cursor" Value="Hand"/>
      <Setter Property="Template">
        <Setter.Value>
          <ControlTemplate TargetType="Button">
-           <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="6" x:Name="border">
+           <Border Background="{TemplateBinding Background}"
+                   BorderBrush="{TemplateBinding BorderBrush}"
+                   BorderThickness="{TemplateBinding BorderThickness}"
+                   CornerRadius="8"
+                   x:Name="border">
              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
            </Border>
            <ControlTemplate.Triggers>
              <Trigger Property="IsMouseOver" Value="True">
-               <Setter TargetName="border" Property="Background" Value="#2D333B"/>
+               <Setter TargetName="border" Property="Background" Value="#0F2A33"/>
              </Trigger>
            </ControlTemplate.Triggers>
          </ControlTemplate>
        </Setter.Value>
      </Setter>
    </Style>
+
+   <Style TargetType="TextBox">
+     <Setter Property="Background" Value="#080808"/>
+     <Setter Property="Foreground" Value="#E0E0E0"/>
+     <Setter Property="BorderBrush" Value="#1F1F1F"/>
+     <Setter Property="BorderThickness" Value="1"/>
+     <Setter Property="Padding" Value="16"/>
+     <Setter Property="FontFamily" Value="Cascadia Code, Consolas, Courier New"/>
+     <Setter Property="FontSize" Value="13"/>
+     <Setter Property="CaretBrush" Value="#00E5FF"/>
+   </Style>
+
  </Window.Resources>
 
  <Grid>
    <Grid.RowDefinitions>
-     <RowDefinition Height="100"/>
+     <RowDefinition Height="120"/>
+     <RowDefinition Height="72"/>
      <RowDefinition Height="*"/>
      <RowDefinition Height="Auto"/>
-     <RowDefinition Height="50"/>
+     <RowDefinition Height="64"/>
    </Grid.RowDefinitions>
 
-   <Border Grid.Row="0" Background="#16191D" BorderBrush="#10B981" BorderThickness="0,0,0,2" Padding="20">
+   <Border Grid.Row="0" Background="#0A0A0A" BorderBrush="#00E5FF" BorderThickness="0,0,0,2" Padding="24,0">
      <Grid>
        <Grid.ColumnDefinitions>
          <ColumnDefinition Width="Auto"/>
          <ColumnDefinition Width="*"/>
          <ColumnDefinition Width="Auto"/>
        </Grid.ColumnDefinitions>
-       <Image x:Name="ImgLogoHeader" Width="70" Height="70" Margin="0,0,15,0" Stretch="Uniform"/>
+
+       <Image Grid.Column="0" x:Name="ImgLogoHeader" Width="100" Height="100" Margin="0,0,24,0" Stretch="Uniform" VerticalAlignment="Center"/>
+
        <StackPanel Grid.Column="1" VerticalAlignment="Center">
-         <TextBlock Text="IOI TOOLS" Foreground="#FFFFFF" FontSize="32" FontWeight="Bold"/>
-         <TextBlock Text="Edición Universal · Open Source" Foreground="#10B981" FontSize="14" Margin="0,4,0,0"/>
+         <TextBlock Text="IOI TOOLS" Foreground="#00E5FF" FontSize="40" FontWeight="Bold" FontFamily="Segoe UI Semibold"/>
+         <TextBlock Text="Suite de mantenimiento · v7.2" Foreground="#909090" FontSize="15" Margin="0,6,0,0"/>
        </StackPanel>
+
        <StackPanel Grid.Column="2" HorizontalAlignment="Right" VerticalAlignment="Center">
-         <TextBlock Text="Cristian Viera" Foreground="#F3F4F6" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Right"/>
-         <TextBlock Text="© 2026" Foreground="#6B7280" FontSize="12" HorizontalAlignment="Right" Margin="0,4,0,0"/>
+         <TextBlock Text="Cristian Viera" Foreground="#FFFFFF" FontWeight="SemiBold" FontSize="20" HorizontalAlignment="Right"/>
+         <TextBlock Text="IOI · 2026" Foreground="#00E5FF" FontSize="13" Margin="0,6,0,0" HorizontalAlignment="Right"/>
        </StackPanel>
      </Grid>
    </Border>
 
-   <Grid Grid.Row="1" Margin="15,10,15,10">
+   <Border Grid.Row="1" Background="#080808" Padding="24,12">
+     <Grid>
+       <Grid.ColumnDefinitions>
+         <ColumnDefinition Width="2.5*"/>
+         <ColumnDefinition Width="1*"/>
+         <ColumnDefinition Width="1*"/>
+         <ColumnDefinition Width="1*"/>
+         <ColumnDefinition Width="1.2*"/>
+       </Grid.ColumnDefinitions>
+       <TextBlock x:Name="TxtWindowsStatus" Grid.Column="0" Foreground="#D0D0D0" FontSize="12" VerticalAlignment="Center"/>
+       <TextBlock x:Name="TxtAdminStatus"   Grid.Column="1" Foreground="#00FF7F" FontSize="12" VerticalAlignment="Center" FontWeight="SemiBold"/>
+       <TextBlock x:Name="TxtNetworkStatus" Grid.Column="2" Foreground="#00FF7F" FontSize="12" VerticalAlignment="Center" FontWeight="SemiBold"/>
+       <TextBlock x:Name="TxtDefenderStatus" Grid.Column="3" Foreground="#D0D0D0" FontSize="12" VerticalAlignment="Center"/>
+       <TextBlock x:Name="TxtDriveStatus"   Grid.Column="4" Foreground="#D0D0D0" FontSize="12" VerticalAlignment="Center" TextAlignment="Right"/>
+     </Grid>
+   </Border>
+
+   <Grid Grid.Row="2" Margin="20,12,20,12">
      <Grid.ColumnDefinitions>
-       <ColumnDefinition Width="240"/>
-       <ColumnDefinition Width="15"/>
+       <ColumnDefinition Width="260"/>
+       <ColumnDefinition Width="20"/>
        <ColumnDefinition Width="*"/>
      </Grid.ColumnDefinitions>
 
-     <Border Grid.Column="0" Background="#16191D" CornerRadius="8" Padding="12">
-       <ScrollViewer VerticalScrollBarVisibility="Auto">
+     <Border Grid.Column="0" Background="#0F0F0F" BorderBrush="#1A1A1A" BorderThickness="1" CornerRadius="10" Padding="14">
+       <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
          <StackPanel>
-           <TextBlock Text="MÓDULOS" Foreground="#6B7280" FontSize="11" FontWeight="Bold" Margin="6,10,0,8"/>
-           <Button x:Name="BtnRAM" Style="{StaticResource NavButton}" Content="RAM" ToolTip="Liberar memoria"/>
-           <Button x:Name="BtnNET" Style="{StaticResource NavButton}" Content="NET" ToolTip="Red"/>
-           <Button x:Name="BtnCLEAN" Style="{StaticResource NavButton}" Content="LIMPIEZA" ToolTip="Archivos temporales"/>
-           <Button x:Name="BtnFIX" Style="{StaticResource NavButton}" Content="REPARACIÓN" ToolTip="SFC y DISM"/>
-           <Button x:Name="BtnBOOST" Style="{StaticResource NavButton}" Content="RENDIMIENTO" ToolTip="CPU y UI"/>
-           <Button x:Name="BtnNETREF" Style="{StaticResource NavButton}" Content="RESET RED" ToolTip="Winsock y DNS"/>
-           <Button x:Name="BtnHerramientas" Style="{StaticResource NavButton}" Content="HERRAMIENTAS" ToolTip="Mantenimiento"/>
-           <Button x:Name="BtnMaestro" Style="{StaticResource NavButton}" Content="MAESTRO" ToolTip="Optimización total"/>
-           <Button x:Name="BtnEmergencia" Style="{StaticResource NavButton}" Content="EMERGENCIA" ToolTip="Acciones rápidas"/>
-           <Button x:Name="BtnSistema" Style="{StaticResource NavButton}" Content="SISTEMA" ToolTip="Info del sistema"/>
-           <Separator Background="#2D333B" Margin="0,10"/>
-           <Button x:Name="BtnLogs" Style="{StaticResource NavButton}" Content="LOGS" ToolTip="Registros"/>
-           <Button x:Name="BtnAyuda" Style="{StaticResource NavButton}" Content="AYUDA" ToolTip="Acerca de"/>
-           <Button x:Name="BtnExit" Style="{StaticResource NavButton}" Content="SALIR" ToolTip="Cerrar"/>
+           <TextBlock Text="MÓDULOS" Foreground="#00E5FF" FontSize="11" FontWeight="Bold" Margin="6,0,0,12"/>
+
+           <Button x:Name="BtnRAM"         Style="{StaticResource NavButton}" Content="🧠   RAM"           ToolTip="Liberar memoria (WorkingSet, Standby, System WS)"/>
+           <Button x:Name="BtnNET"         Style="{StaticResource NavButton}" Content="🌐   NET"           ToolTip="Info de red + optimización"/>
+           <Button x:Name="BtnCLEAN"       Style="{StaticResource NavButton}" Content="🧹   CLEAN"         ToolTip="Limpieza: Rápida, Profunda o Extrema"/>
+           <Button x:Name="BtnFIX"         Style="{StaticResource NavButton}" Content="🔧   FIX"           ToolTip="SFC / DISM / Ambos"/>
+           <Button x:Name="BtnBOOST"       Style="{StaticResource NavButton}" Content="⚡   BOOST"         ToolTip="Rendimiento: plan, CPU, UI, gráficos, IA"/>
+           <Button x:Name="BtnNETREF"      Style="{StaticResource NavButton}" Content="🌐   NETREF"        ToolTip="Reset completo de pila de red"/>
+           <Button x:Name="BtnHerramientas" Style="{StaticResource NavButton}" Content="🛠️   HERRAMIENTAS" ToolTip="Mantenimiento, fantasmas, purga"/>
+           <Button x:Name="BtnMaestro"     Style="{StaticResource NavButton}" Content="🚀   MAESTRO v10"   ToolTip="Motor principal de optimización"/>
+           <Button x:Name="BtnEmergencia"  Style="{StaticResource NavButton}" Content="🚨   EMERGENCIA"    ToolTip="Acciones rápidas"/>
+           <Button x:Name="BtnSistema"     Style="{StaticResource NavButton}" Content="💻   SISTEMA"       ToolTip="Información completa del sistema"/>
+
+           <Separator Background="#1F1F1F" Margin="0,12"/>
+
+           <TextBlock Text="UTILIDADES" Foreground="#606060" FontSize="10" FontWeight="Bold" Margin="6,4,0,8"/>
+
+           <Button x:Name="BtnLogs"  Style="{StaticResource NavButton}" Content="📋   LOGS"   ToolTip="Ver logs automáticos"/>
+           <Button x:Name="BtnAyuda" Style="{StaticResource NavButton}" Content="❓   AYUDA"  ToolTip="Acerca de IOI Tools"/>
+           <Button x:Name="BtnExit"  Style="{StaticResource NavButton}" Content="❌   SALIR"  ToolTip="Cerrar IOI Tools"/>
          </StackPanel>
        </ScrollViewer>
      </Border>
 
-     <Border Grid.Column="2" Background="#16191D" CornerRadius="8" Padding="25">
+     <Border Grid.Column="2" Background="#0F0F0F" BorderBrush="#1A1A1A" BorderThickness="1" CornerRadius="10" Padding="28">
        <Grid>
          <Grid.RowDefinitions>
-           <RowDefinition Height="Auto"/>
            <RowDefinition Height="Auto"/>
            <RowDefinition Height="Auto"/>
            <RowDefinition Height="Auto"/>
            <RowDefinition Height="*"/>
            <RowDefinition Height="Auto"/>
          </Grid.RowDefinitions>
-         <TextBlock x:Name="TxtTitle" Foreground="#FFFFFF" FontSize="24" FontWeight="Bold"/>
-         <TextBlock x:Name="TxtDescription" Grid.Row="1" Foreground="#9CA3AF" FontSize="14" TextWrapping="Wrap" Margin="0,5,0,10"/>
-         <TextBlock x:Name="TxtMeta" Grid.Row="2" Foreground="#10B981" FontSize="12" FontWeight="SemiBold" Margin="0,0,0,15"/>
-         
-         <!-- Barra de progreso principal (oculta por defecto) -->
-         <ProgressBar x:Name="MainProgress" Grid.Row="3" Height="4" Visibility="Collapsed" IsIndeterminate="True" Background="#2D333B" Foreground="#10B981" Margin="0,0,0,15"/>
 
-         <TextBox x:Name="TxtOutput" Grid.Row="4" Background="#0F1115" Foreground="#D1D5DB" BorderBrush="#2D333B" Padding="15" FontFamily="Consolas" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True"/>
-         
-         <StackPanel x:Name="ActionPanel" Grid.Row="5" Orientation="Horizontal" Margin="0,20,0,0">
-           <Button x:Name="BtnPrimary" Style="{StaticResource PrimaryButton}" Visibility="Collapsed"/>
+         <TextBlock x:Name="TxtTitle" Foreground="#FFFFFF" FontSize="28" FontWeight="Bold"/>
+         <TextBlock x:Name="TxtDescription" Grid.Row="1" Foreground="#A0A0A0" FontSize="14" TextWrapping="Wrap" Margin="0,8,0,10"/>
+         <TextBlock x:Name="TxtMeta" Grid.Row="2" Foreground="#00E5FF" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,16"/>
+
+         <TextBox x:Name="TxtOutput" Grid.Row="3"
+                  VerticalScrollBarVisibility="Auto"
+                  HorizontalScrollBarVisibility="Disabled"
+                  TextWrapping="Wrap"
+                  AcceptsReturn="True"
+                  IsReadOnly="True"/>
+
+         <StackPanel x:Name="ActionPanel" Grid.Row="4" Orientation="Horizontal" Margin="0,20,0,0">
+           <Button x:Name="BtnPrimary"   Style="{StaticResource PrimaryButton}"   Visibility="Collapsed"/>
            <Button x:Name="BtnSecondary" Style="{StaticResource SecondaryButton}" Visibility="Collapsed"/>
-           <Button x:Name="BtnTertiary" Style="{StaticResource SecondaryButton}" Visibility="Collapsed"/>
+           <Button x:Name="BtnTertiary"  Style="{StaticResource SecondaryButton}" Visibility="Collapsed"/>
          </StackPanel>
        </Grid>
      </Border>
    </Grid>
 
-   <!-- TASK BAR (Barra de tareas en background, oculta por defecto) -->
-   <Border Grid.Row="2" x:Name="TaskBar" Background="#0F1115" BorderBrush="#10B981" BorderThickness="0,2,0,0" Padding="24,10" Visibility="Collapsed">
+   <Border Grid.Row="3" x:Name="TaskBar" Background="#1A0000" BorderBrush="#FF8800" BorderThickness="0,2,0,0" Padding="24,10" Visibility="Collapsed">
      <Grid>
        <Grid.ColumnDefinitions>
          <ColumnDefinition Width="Auto"/>
          <ColumnDefinition Width="*"/>
          <ColumnDefinition Width="Auto"/>
        </Grid.ColumnDefinitions>
+
        <TextBlock Grid.Column="0" Text="⏳" FontSize="20" VerticalAlignment="Center" Margin="0,0,12,0"/>
+
        <StackPanel Grid.Column="1" VerticalAlignment="Center">
-         <TextBlock x:Name="TxtTaskName" Text="Tarea en ejecución..." Foreground="#10B981" FontSize="13" FontWeight="SemiBold"/>
-         <TextBlock x:Name="TxtTaskInfo" Text="Preparando..." Foreground="#6B7280" FontSize="11" Margin="0,2,0,0"/>
+         <TextBlock x:Name="TxtTaskName" Text="Tarea en ejecución..." Foreground="#FFB300" FontSize="13" FontWeight="SemiBold"/>
+         <TextBlock x:Name="TxtTaskInfo" Text="Preparando..." Foreground="#FFD966" FontSize="11" Margin="0,2,0,0"/>
        </StackPanel>
+
        <StackPanel Grid.Column="2" VerticalAlignment="Center" MinWidth="200">
-         <ProgressBar x:Name="TaskProgress" Height="8" Background="#2D333B" Foreground="#10B981" Value="0" Maximum="100"/>
-         <TextBlock x:Name="TxtTaskPercent" Text="0%" Foreground="#10B981" FontSize="11" HorizontalAlignment="Right" Margin="0,4,0,0"/>
+         <ProgressBar x:Name="TaskProgress" Height="8" Background="#330000" Foreground="#FFB300" Value="0" Maximum="100"/>
+         <TextBlock x:Name="TxtTaskPercent" Text="0%" Foreground="#FFB300" FontSize="11" HorizontalAlignment="Right" Margin="0,4,0,0"/>
        </StackPanel>
      </Grid>
    </Border>
 
-   <!-- FOOTER -->
-   <Border Grid.Row="3" Background="#16191D" BorderBrush="#2D333B" BorderThickness="0,1,0,0" Padding="20,8">
+   <Border Grid.Row="4" Background="#080808" BorderBrush="#1A1A1A" BorderThickness="0,1,0,0" Padding="24,10">
      <Grid>
        <Grid.ColumnDefinitions>
          <ColumnDefinition Width="Auto"/>
          <ColumnDefinition Width="*"/>
          <ColumnDefinition Width="Auto"/>
        </Grid.ColumnDefinitions>
-       
-       <Image Grid.Column="0" x:Name="ImgLogoNeon" Width="40" Height="40" Margin="0,0,10,0" Stretch="Uniform"/>
-       
+
+       <Image Grid.Column="0" x:Name="ImgLogoNeon" Width="44" Height="44" Margin="0,0,14,0" Stretch="Uniform"/>
+
        <StackPanel Grid.Column="1" VerticalAlignment="Center">
-         <TextBlock x:Name="TxtStatus" Text="Estado: Listo" Foreground="#10B981" FontSize="12" FontWeight="SemiBold"/>
-         <TextBlock Text="Proyecto de código abierto - Siéntete libre de modificarlo." Foreground="#6B7280" FontSize="10" Margin="0,2,0,0"/>
+         <TextBlock x:Name="TxtStatus" Text="Estado: Listo" Foreground="#00FF7F" FontSize="12" FontWeight="SemiBold"/>
+         <TextBlock Text="Sistema optimizado por IOI Tools v7.2" Foreground="#505050" FontSize="10" Margin="0,2,0,0"/>
        </StackPanel>
 
        <StackPanel Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Right">
-         <TextBlock Text="Cristian Viera" Foreground="#F3F4F6" FontSize="12" FontWeight="Bold" HorizontalAlignment="Right"/>
-         <TextBlock Text="IOI · 2026" Foreground="#6B7280" FontSize="10" HorizontalAlignment="Right" Margin="0,2,0,0"/>
+         <TextBlock Text="Cristian Viera" Foreground="#00E5FF" FontSize="12" FontWeight="Bold" HorizontalAlignment="Right"/>
+         <TextBlock Text="IOI · 2026" Foreground="#505050" FontSize="10" HorizontalAlignment="Right" Margin="0,2,0,0"/>
        </StackPanel>
      </Grid>
    </Border>
@@ -405,20 +550,23 @@ function Show-ToastNotification {
 try {
     $Reader = New-Object System.Xml.XmlNodeReader $Xaml
     $Window = [Windows.Markup.XamlReader]::Load($Reader)
-    
-    # Aplicar ícono .ico a la ventana (barra de tareas)
+
+    # Forzamos la ruta correcta del ícono en el Búnker
+    $IOI_LogoApp = Join-Path (Split-Path $ScriptDir -Parent) "Recursos\Iconos\IOI_Tools.ico"
+
+    # Aplicar icono .ico a la ventana (barra de tareas)
     try {
-        $ico = [System.Windows.Media.Imaging.BitmapFrame]::Create(
-            [System.Uri]::new($IOI_LogoApp)
-        )
-        $Window.Icon = $ico
+        if ($IOI_LogoApp -and (Test-Path $IOI_LogoApp)) {
+            $ico = [System.Windows.Media.Imaging.BitmapFrame]::Create([System.Uri]::new($IOI_LogoApp))
+            $Window.Icon = $ico
+        }
     } catch {
-        Write-Host "⚠ No se pudo aplicar el .ico: $($_.Exception.Message)" -ForegroundColor Yellow
+        # Si el icono falla, lo ignoramos silenciosamente
     }
 
     # Header Logo
     $ImgLogoHeader = $Window.FindName("ImgLogoHeader")
-    if ($ImgLogoHeader -and (Test-Path $IOI_LogoHeader)) {
+    if ($ImgLogoHeader -and $IOI_LogoHeader -and (Test-Path $IOI_LogoHeader)) {
         $bmpHeader = New-Object System.Windows.Media.Imaging.BitmapImage
         $bmpHeader.BeginInit()
         $bmpHeader.UriSource = New-Object System.Uri($IOI_LogoHeader)
@@ -427,9 +575,9 @@ try {
         $ImgLogoHeader.Source = $bmpHeader
     }
 
-    # Footer Logo
+    # Footer Logo (Neon)
     $ImgLogoNeon = $Window.FindName("ImgLogoNeon")
-    if ($ImgLogoNeon -and (Test-Path $IOI_LogoNeon)) {
+    if ($ImgLogoNeon -and $IOI_LogoNeon -and (Test-Path $IOI_LogoNeon)) {
         $bmpNeon = New-Object System.Windows.Media.Imaging.BitmapImage
         $bmpNeon.BeginInit()
         $bmpNeon.UriSource = New-Object System.Uri($IOI_LogoNeon)
@@ -437,13 +585,9 @@ try {
         $bmpNeon.EndInit()
         $ImgLogoNeon.Source = $bmpNeon
     }
+
 } catch {
-    [System.Windows.MessageBox]::Show(
-        "No se pudo cargar la interfaz.`n`n$($_.Exception.Message)",
-        "IOI Tools - Error",
-        [System.Windows.MessageBoxButton]::OK,
-        [System.Windows.MessageBoxImage]::Error
-    ) | Out-Null
+    [System.Windows.MessageBox]::Show("No se pudo cargar la interfaz.`n$($_.Exception.Message)", "IOI Tools - Error", "OK", "Error") | Out-Null
     exit 1
 }
 #endregion
@@ -488,30 +632,6 @@ $TxtTaskInfo     = $Window.FindName("TxtTaskInfo")
 $TaskProgress    = $Window.FindName("TaskProgress")
 $TxtTaskPercent  = $Window.FindName("TxtTaskPercent")
 
-# =========================================================================================
-# TEXTOS FANTASMA (Fix para el nuevo diseño)
-# =========================================================================================
-# Estos controles ya no existen en el diseño visual, pero el código los busca.
-# Los creamos invisibles para que el script no se detenga.
-if (-not $TxtDefenderStatus) { 
-    $TxtDefenderStatus = New-Object System.Windows.Controls.TextBlock 
-}
-if (-not $TxtDriveStatus) { 
-    $TxtDriveStatus = New-Object System.Windows.Controls.TextBlock 
-}
-if (-not $TxtNetworkStatus) { 
-    $TxtNetworkStatus = New-Object System.Windows.Controls.TextBlock 
-}
-if (-not $TxtAdminStatus) { 
-    $TxtAdminStatus = New-Object System.Windows.Controls.TextBlock 
-}
-if (-not $TxtWindowsStatus) { 
-    $TxtWindowsStatus = New-Object System.Windows.Controls.TextBlock 
-}
-if (-not $MainProgress) { 
-    $MainProgress = New-Object System.Windows.Controls.ProgressBar 
-}
-
 $script:NavigationButtons = @(
     $BtnRAM, $BtnNET, $BtnCLEAN, $BtnFIX, $BtnBOOST, $BtnNETREF,
     $BtnHerramientas, $BtnMaestro, $BtnEmergencia, $BtnSistema,
@@ -546,22 +666,25 @@ function Set-ActionButton {
 
 function Set-Page {
     param(
-        [string]$Title,
-        [string]$Description,
-        [string]$Meta,
-        [string]$Body,
-        [string]$PrimaryLabel = "", [scriptblock]$PrimaryAction = $null,
-        [string]$SecondaryLabel = "", [scriptblock]$SecondaryAction = $null,
-        [string]$TertiaryLabel = "", [scriptblock]$TertiaryAction = $null
+        [string]$Title, [string]$Desc, [string]$Meta, [string]$Body,
+        [string]$P1 = "", [scriptblock]$PA1 = $null,
+        [string]$P2 = "", [scriptblock]$PA2 = $null,
+        [string]$P3 = "", [scriptblock]$PA3 = $null
     )
+    
     $TxtTitle.Text = $Title
-    $TxtDescription.Text = $Description
+    $TxtDescription.Text = $Desc
     $TxtMeta.Text = $Meta
     $TxtOutput.Text = $Body
-
-    Set-ActionButton $BtnPrimary   $PrimaryLabel   "Primary"   $PrimaryAction
-    Set-ActionButton $BtnSecondary $SecondaryLabel "Secondary" $SecondaryAction
-    Set-ActionButton $BtnTertiary  $TertiaryLabel  "Tertiary"  $TertiaryAction
+    
+    # Blindaje para que los botones no fallen si el panel no se encuentra
+    if ($ActionPanel) { $ActionPanel.Visibility = "Visible" }
+    if ($StatusCardsPanel) { $StatusCardsPanel.Visibility = "Collapsed" }
+    if ($TxtOutput) { $TxtOutput.Visibility = "Visible" }
+    
+    Set-ActionButton $BtnPrimary $P1 "Primary" $PA1
+    Set-ActionButton $BtnSecondary $P2 "Secondary" $PA2
+    Set-ActionButton $BtnTertiary $P3 "Tertiary" $PA3
 }
 
 function Set-Busy {
@@ -660,47 +783,54 @@ function Refresh-SystemStatus {
 
 #region HOME
 function Show-HomePage {
-    Set-Page `
-        "Esto es IOI TOOLS v7.2" `
-        "Suite navaja suiza de mantenimiento y optimización para Windows 10/11 (últimas versiones). Tareas en segundo plano y barras de progreso en tiempo real." `
-        "CRISTIAN VIERA · v7.2 · ADMINISTRADOR" `
-@"
+    if ($StatusCardsPanel) { $StatusCardsPanel.Visibility = "Collapsed" }
+    if ($TxtOutput) { $TxtOutput.Visibility = "Visible" }
+    if ($ActionPanel) { $ActionPanel.Visibility = "Collapsed" }
+    
+    $TxtTitle.Text = "Bienvenido a IOI Tools v7.2"
+    $TxtDescription.Text = "Suite de mantenimiento y optimización para Windows 11. Estilo MS Store, tareas en background y barras de progreso reales."
+    $TxtMeta.Text = "CRISTIAN VIERA · v7.2 · ADMINISTRADOR"
+    
+    $TxtStatus.Text = "Estado: Listo"
+    $TxtStatus.Foreground = [System.Windows.Media.Brushes]::MediumSpringGreen
+
+    $TextoBienvenida = @"
 Selecciona un módulo en el menú de la izquierda.
 
 MÓDULOS DISPONIBLES
-─────────────────────────────────────────────────────────────
-🧠 RAM          - Liberar memoria (WorkingSet/Standby/System WS)
-🌐 NET          - Info de red + optimización
-🧹 CLEAN        - Limpieza (rápida/profunda/extrema)
-🔧 FIX          - Reparación (SFC/DISM)
-⚡ BOOST        - Rendimiento (plan/CPU/UI/gráficos/IA)
-🌐 NETREF       - Reiniciar pila de red
-🛠️  HERRAMIENTAS - Mantenimiento, fantasmas, purga
-🚀 MAESTRO v10  - Optimización total (motor principal)
-🚨 EMERGENCIA   - Acciones rápidas
-💻 SISTEMA      - Info completa en vivo
+==============================================================
+  RAM            - Liberar memoria (WorkingSet/Standby/System WS)
+  NET            - Info de red + optimización
+  CLEAN          - Limpieza (rápida/profunda/extrema)
+  FIX            - Reparación (SFC/DISM)
+  BOOST          - Rendimiento (plan/CPU/UI/gráficos/IA)
+  NETREF         - Reiniciar pila de red
+  HERRAMIENTAS   - Mantenimiento, fantasmas, purga
+  MAESTRO v10    - Optimización total (motor principal)
+  EMERGENCIA     - Acciones rápidas
+  SISTEMA        - Info completa en vivo
 
 NOVEDADES v7.2
-─────────────────────────────────────────────────────────────
-✨ Look MS Store: header grande, hover suave, bordes redondeados
-⏳ Tareas en background: navega mientras corren
-📊 Barra de progreso real con porcentaje
-🎨 Panel de tarea persistente en el footer
-🔧 Correcciones aplicadas: XAML, Fantasmas, Purga
+--------------------------------------------------------------
+  * Look MS Store: header grande, hover suave, bordes redondeados
+  * Tareas en background: navega mientras corren
+  * Barra de progreso real con porcentaje
+  * Panel de tarea persistente en el footer
+  * Correcciones aplicadas: XAML, Fantasmas, Purga
 
 FILOSOFÍA
-─────────────────────────────────────────────────────────────
-• 100% PowerShell
-• Portable, sin instalación
-• Sin telemetría
-• Sin IA integrada
-• Sin respaldos automáticos
-• Transparencias y efectos visuales INTACTOS
-
-ROOT IOI
-$IOI_Root
+--------------------------------------------------------------
+  * 100% PowerShell
+  * Portable, sin instalación
+  * Sin telemetría
+  * Sin IA integrada
+  * Sin respaldos automáticos
+  * Transparencias y efectos visuales INTACTOS
 "@
+
+    $TxtOutput.Text = $TextoBienvenida
 }
+
 #endregion
 
 #region RAM
@@ -754,48 +884,57 @@ public class Mem {
 "@
         if (-not ([System.Management.Automation.PSTypeName]'Mem').Type) { Add-Type -TypeDefinition $NativeCode -ErrorAction SilentlyContinue }
 
-        $procs = Get-Process | Where-Object { $_.ProcessName -notin $script:ExclusionesKernel }
-        $i = 0; $total = $procs.Count
-        foreach ($p in $procs) {
-            $i++
-            try { [Mem]::EmptyWorkingSet($p.Handle) } catch {}
-            if ($i % 10 -eq 0) { Update-TaskProgress -Percent (20 + [int](($i/$total)*50)) -Info "WorkingSet: $i/$total" }
+        # 1. EmptyWorkingSet en todos los procesos
+        $procesos = Get-Process -ErrorAction SilentlyContinue
+        $liberados = 0
+        $totalProcesos = $procesos.Count
+        $contador = 0
+        
+        foreach ($proc in $procesos) {
+            $contador++
+            if ($contador % 10 -eq 0) {
+                $porcentaje = [math]::Round(($contador / $totalProcesos) * 60) + 20
+                Update-TaskProgress -Percent $porcentaje -Info "Optimizando: $($proc.ProcessName)"
+            }
+            try {
+                if ($proc.Id -eq $PID) { continue }
+                if ($proc.ProcessName -in @('System','Idle','csrss','wininit','services','lsass','smss')) { continue }
+                $handle = $proc.Handle
+                if ($handle -ne [IntPtr]::Zero) {
+                    [void][Mem]::EmptyWorkingSet($handle)
+                    $liberados++
+                }
+            } catch { continue }
         }
 
-        Update-TaskProgress -Percent 75 -Info "Standby + System WS..."
-        $sb = [Mem]::EmptyStandbyList()
-        $ws = [Mem]::EmptySystemWS()
-        [System.GC]::Collect()
-        [System.GC]::WaitForPendingFinalizers()
+        Update-TaskProgress -Percent 85 -Info "Vaciando Standby List..."
+        [Mem]::EmptyStandbyList() | Out-Null
+        Start-Sleep -Milliseconds 300
 
-        Update-TaskProgress -Percent 90 -Info "Recolectando..."
+        Update-TaskProgress -Percent 95 -Info "Vaciando caché del sistema..."
+        [Mem]::EmptySystemWS() | Out-Null
+        
+        Update-TaskProgress -Percent 100 -Info "¡Completado!"
+        Start-Sleep -Milliseconds 500
 
-        $usedRAMAfter = (Get-Process | Measure-Object -Property WorkingSet -Sum).Sum / 1GB
-        $liberado = [math]::Round($usedRAM - $usedRAMAfter, 2)
+        # Cálculo final
+        $ramLibre = [math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1024, 0)
 
-        $Report = @"
-RAM LIBERADA
-─────────────────────────────────────────────────────────────
-RAM antes:   $([math]::Round($usedRAM, 2)) GB ($percent%)
-RAM después: $([math]::Round($usedRAMAfter, 2)) GB ($([math]::Round(($usedRAMAfter/$totalRAM)*100,0))%)
-Liberado:    $liberado GB
+        # Mostramos el resultado en la pantalla de Ayuda
+        $TextoAyuda = "✅ Limpieza PROFUNDA completada con éxito.`n`n"
+        $TextoAyuda += "Procesos optimizados: $liberados de $totalProcesos`n"
+        $TextoAyuda += "Memoria RAM libre actual: $ramLibre MB`n`n"
+        $TextoAyuda += "Se han vaciado las listas de espera (Standby) y la caché del sistema.`n"
+        $TextoAyuda += "El sistema debería responder de forma más fluida ahora."
+        
+        Show-AyudaPage $TextoAyuda
 
-Standby List:        $(if ($sb) {"✓ Liberada"} else {"✗ Falló"})
-System Working Set:  $(if ($ws) {"✓ Liberado"} else {"✗ Falló"})
-"@
-        Update-TaskProgress -Percent 100 -Info "✅ Completado"
-        Start-Sleep -Milliseconds 800
-        $TxtOutput.Text = $Report
-        $Log = Save-IOILog "RAM-Liberacion" "Completado" $Report
-        $TxtOutput.Text += "`n`nLOG: $Log"
-        Refresh-SystemStatus
-        Play-SuccessSound
-        Show-ToastNotification -Title "IOI Tools" -Message "RAM liberada: $liberado GB"
     } catch {
-        $TxtOutput.Text = "❌ Error: $($_.Exception.Message)"
-        Play-ErrorSound
+        $TextoAyuda = "❌ Ocurrió un error al limpiar la RAM:`n$($_.Exception.Message)"
+        Show-AyudaPage $TextoAyuda
+    } finally {
+        Set-Busy $false
     }
-    Set-Busy $false
 }
 
 function Show-RAMPage {
@@ -1709,40 +1848,34 @@ Los logs se generan automáticamente con cada acción.
 
 #region AYUDA
 function Show-AyudaPage {
-    Set-Page `
-        "❓ AYUDA - Acerca de IOI Tools" `
-        "IOI Tools v7.2 - Edición Universal" `
-        "CRISTIAN VIERA · 2026" `
-@"
-IOI TOOLS v7.2
-
-═══════════════════════════════════════════════════════════════
+    if ($StatusCardsPanel) { $StatusCardsPanel.Visibility = "Collapsed" }
+    if ($TxtOutput) { $TxtOutput.Visibility = "Visible" }
+    if ($ActionPanel) { $ActionPanel.Visibility = "Collapsed" }
+    $TxtStatus.Text = "Estado: AYUDA"
+    
+    $TextoAyuda = @"
 AUTOR
 Cristian Viera
 
 FILOSOFÍA
-• 100% PowerShell
-• Portable, sin instalación
-• Sin telemetría
-• Sin IA integrada
-• Sin respaldos automáticos
-• Transparencias y efectos visuales INTACTOS
+- 100% PowerShell
+- Portable, sin instalación
+- Sin telemetría
+- Sin IA integrada
+- Sin respaldos automáticos
+- Transparencias y efectos visuales INTACTOS
 
 ¿QUÉ ES IOI TOOLS?
-
-Es un conjunto de utilidades siempre gratuita y de código abierto en la que puedes aplicar las opciones que necesites para ayudarle a tu equipo (Windows 10/11) a trabajar, verse y desempeñarse mejor de como lo tienes en este momento. Esta es una compilación y mejora de scripts, programas y diversos tweaks que he compilado y sigo mejorando para que los tengas a la mano y puedas siempre utilizar esta herramienta de optimización a la mano. De servirte, compartir IOI Tools ayudará a más usuarios como a ti.
+Es un conjunto de utilidades siempre gratuita y de código abierto en la que puedes aplicar las opciones que necesites para ayudar a tu equipo (Windows 10/11) a trabajar, verse y desempeñarse mejor de como lo tienes en este momento. Esta es una compilación y mejora de scripts, programas y diversos tweaks que he compilado y sigo mejorando para que los tengas a la mano y puedas siempre utilizar esta herramienta de optimización a la mano. De servirte, compartir IOI Tools ayudará a más usuarios como a ti.
 
 ¡Disfruta y muchas gracias por usar IOI Tools!
 
 LOGS
-$($script:LogFolder)
-
-CONTACTO
-holaioitools@gmail.com
-
-═══════════════════════════════════════════════════════════════
+$script:LogFolder
 "@
+    Set-Page "❓ AYUDA - Acerca de IOI Tools" "IOI Tools v7.2 - Edición Universal" "CRISTIAN VIERA · 2026" $TextoAyuda
 }
+
 #endregion
 
 #region NAVEGACIÓN
