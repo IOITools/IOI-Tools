@@ -13,7 +13,7 @@ Este no es solo un script más. Nació de la necesidad de tener el control total
 
 ## 🚀 ¿Cómo empezar? (Súper fácil)
 
-1. Ve a la sección **[Releases](https://github.com/IOTools/IOI-Tools/releases)** (a la derecha de esta página) y descarga el archivo **`IOI_Tools_v7.2.zip`**.
+1. Ve a la sección **[Releases](https://github.com/IOITools/IOI-Tools/releases)** (a la derecha de esta página) y descarga el archivo **\IOI_Tools_v2.0.zip`**.`
 2. Descomprime el archivo `.zip` en una carpeta de tu preferencia (por ejemplo, en tu Escritorio).
 3. Haz doble clic en el archivo **`Run-IOI-GUI.bat`**.
 4. ¡Listo! Se abrirá la ventana de IOI Tools.
@@ -23,7 +23,7 @@ Este no es solo un script más. Nació de la necesidad de tener el control total
 ---
 
 ## 🛠️ ¿Qué puedes hacer con IOI Tools?
-- **RAM:** Liberar memoria de forma segura.
+- **RAM:** Liberar memoria de forma segura y con **medición extendida**.
 - **Limpieza:** Eliminar archivos temporales, cache y registros.
 - **Rendimiento:** Ajustar el plan de energía y prioridades.
 - **Sistema:** Consultar información detallada en tiempo real.
